@@ -1,0 +1,54 @@
+# ── Secrets ────────────────────────────────────────────────────────────────
+.env
+backend/.env
+frontend_rn/.env
+
+# ── Local runtime data ──────────────────────────────────────────────────────
+local_storage/
+
+# ── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+*.egg
+
+# ── Node / Expo ──────────────────────────────────────────────────────────────
+node_modules/
+frontend_rn/node_modules/
+frontend_rn/.expo/
+frontend_rn/dist/
+frontend_rn/web-build/
+frontend_rn/.env.local
+.expo/
+
+# ── Expo native builds ───────────────────────────────────────────────────────
+android/
+ios/
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*.orig.*
+web-build/
+
+# ── EAS Build ────────────────────────────────────────────────────────────────
+.easignore
+
+# ── OS / editor ──────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ── Misc ─────────────────────────────────────────────────────────────────────
+*.log

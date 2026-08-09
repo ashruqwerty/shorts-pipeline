@@ -1,0 +1,22 @@
+{
+  "expo": {
+    "name": "Shorts Creator Console",
+    "slug": "shorts-creator-console",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "platforms": ["android", "ios", "web"],
+    "web": {
+      "bundler": "metro"
+    },
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow Shorts Creator to access your camera to record sections.",
+          "microphonePermission": "Allow Shorts Creator to access your microphone to record audio."
+        }
+      ]
+    ]
+  }
+}
