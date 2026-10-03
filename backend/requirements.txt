@@ -2,5 +2,10 @@ fastapi==0.116.1
 uvicorn[standard]==0.35.0
 python-multipart==0.0.20
 pydantic==2.11.7
-anthropic>=1.77.0
+google-genai>=1.0.0
 python-dotenv>=1.0.0
+openai-whisper>=20240930
+Pillow>=10.0.0
+requests>=2.31.0
+youtube-transcript-api>=0.6.3
+yt-dlp>=2024.0

@@ -1,98 +1,6 @@
 from datetime import datetime
-from enum import Enum
-from typing import Literal
+from pydantic import BaseModel
 
-from pydantic import BaseModel, computed_field, field_validator
-
-
-# ---------------------------------------------------------------------------
-# Voice cue taxonomy (F001)
-# ---------------------------------------------------------------------------
-
-class VoiceCue(str, Enum):
-    SLOW      = "SLOW"
-    FAST      = "FAST"
-    NORMAL    = "NORMAL"
-    EMPHASIZE = "EMPHASIZE"
-    WHISPER   = "WHISPER"
-    LOUD      = "LOUD"
-    HIGH      = "HIGH"
-    LOW       = "LOW"
-    PAUSE     = "PAUSE"
-    BEAT      = "BEAT"
-    BREATHE   = "BREATHE"
-    EXCITED   = "EXCITED"
-    SERIOUS   = "SERIOUS"
-
-
-CUE_COLORS: dict[str, str] = {
-    "SLOW":      "#60A5FA",
-    "FAST":      "#F97316",
-    "NORMAL":    "#9CA3AF",
-    "EMPHASIZE": "#FBBF24",
-    "WHISPER":   "#C4B5FD",
-    "LOUD":      "#F87171",
-    "HIGH":      "#34D399",
-    "LOW":       "#6366F1",
-    "PAUSE":     "#9CA3AF",
-    "BEAT":      "#4B5563",
-    "BREATHE":   "#86EFAC",
-    "EXCITED":   "#FB923C",
-    "SERIOUS":   "#374151",
-}
-
-SectionName = Literal[
-    "hook", "context", "evidence", "story_turn", "takeaway", "cta"
-]
-
-ShotType = Literal["a_roll", "b_roll"]
-
-
-# ---------------------------------------------------------------------------
-# Script v2 section (F001)
-# ---------------------------------------------------------------------------
-
-class SectionTiming(BaseModel):
-    start_s: int
-    end_s: int
-
-
-class ScriptSectionV2(BaseModel):
-    index: int                          # 0–5, canonical FFmpeg ordering key
-    name: SectionName
-    label: str
-    timing: SectionTiming
-    shot_type: ShotType
-    word_count: int
-    text: str                           # narration with inline [CUE] tokens
-    plain_text: str                     # narration with [CUE] tokens stripped
-    cue_summary: list[str]              # deduplicated cues found in text
-    on_screen_text: str
-    transition_after: str
-    b_roll_slot: bool
-    b_roll_prompt: str
-    proof_overlay: str
-
-
-# ---------------------------------------------------------------------------
-# Script v2 root (F001)
-# ---------------------------------------------------------------------------
-
-class ScriptV2(BaseModel):
-    schema_version: Literal[2] = 2
-    topic: str
-    video_title: str
-    tone: str
-    duration_sec: int
-    total_word_count: int
-    cta: str
-    disclaimer: str
-    sections: list[ScriptSectionV2]
-
-
-# ---------------------------------------------------------------------------
-# API response models
-# ---------------------------------------------------------------------------
 
 class AssetOut(BaseModel):
     id: str
@@ -101,7 +9,7 @@ class AssetOut(BaseModel):
     kind: str
     topic: str | None
     recording_date: str | None
-    section_index: int | None
+    section_index: int | None = None
     size_bytes: int
     created_at: datetime
     download_url: str
@@ -118,30 +26,170 @@ class DailyStatusUpdate(BaseModel):
     status: str
 
 
+class ScriptBundleOut(BaseModel):
+    date_ist: str
+    version: int
+    created_at: str
+    script: dict[str, object]
+
+
+class TeleprompterOut(BaseModel):
+    date_ist: str
+    version: int
+    sections: list[dict[str, object]]
+
+
+class PipelineTriggerOut(BaseModel):
+    date_ist: str
+    status: str
+    progress: str
+    output_path: str | None = None
+
+
+class PipelineStatusOut(BaseModel):
+    date_ist: str
+    status: str | None
+    progress: str
+    output_path: str | None = None
+    step: str | None = None
+    logs: list[str] = []
+    ffmpeg_pct: float | None = None
+
+
+class ScriptChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class ScriptChatRequest(BaseModel):
+    message: str
+    history: list[ScriptChatMessage] = []
+    scope: str = "section"
+
+
+class ScriptChatResponse(BaseModel):
+    action: str
+    reply: str
+    proposed_sections: list[dict[str, object]] | None = None
+    apply_token: str | None = None
+    sections_changed: list[int] | None = None
+    clarifying_question: str | None = None
+
+
+class ScriptApplyRequest(BaseModel):
+    apply_token: str
+
+
+class ScriptRevertRequest(BaseModel):
+    date_ist: str
+    to_version: int
+
+
+# ── Series Creator ────────────────────────────────────────────────────────────
+
+class SeriesItemOut(BaseModel):
+    day_offset: int
+    sub_topic: str
+    category: str
+    topic_angle: str
+    hook_idea: str
+    plan_notes: str | None = None
+    script_draft: str | None = None
+
+
+class SeriesDraftOut(BaseModel):
+    id: str
+    name: str
+    day_count: int
+    status: str
+    items: list[SeriesItemOut]
+    created_at: str
+
+
+class SeriesGenerateRequest(BaseModel):
+    theme: str
+    day_count: int = 10
+
+
+class SeriesChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class SeriesChatRequest(BaseModel):
+    series_id: str
+    message: str
+    history: list[SeriesChatMessage] = []
+
+
+class SeriesChatResponse(BaseModel):
+    action: str
+    reply: str
+    episodes: list[SeriesItemOut] | None = None
+    episodes_changed: list[int] | None = None
+    clarifying_question: str | None = None
+
+
+class SeriesActivateRequest(BaseModel):
+    series_id: str
+
+
+class EpisodePlanRequest(BaseModel):
+    series_id: str
+    day_offset: int
+    message: str = ""
+    history: list[SeriesChatMessage] = []
+
+
+class EpisodePlanResponse(BaseModel):
+    action: str
+    reply: str
+    key_points: list[str] | None = None
+    updated_angle: str | None = None
+    updated_hook: str | None = None
+    plan: dict[str, object] | None = None
+
+
+class EpisodeSavePlanRequest(BaseModel):
+    series_id: str
+    day_offset: int
+    plan: dict[str, object]
+
+
+class EpisodeGenerateScriptRequest(BaseModel):
+    series_id: str
+    day_offset: int
+
+
+class EpisodeScriptOut(BaseModel):
+    series_id: str
+    day_offset: int
+    script: dict[str, object]
+
+
 class DailyAssignOut(BaseModel):
     date_ist: str
     status: str
     topic: dict[str, str]
     overview: dict[str, object]
     script_version: int
+    series_context: dict[str, object] | None = None
 
 
-class ScriptBundleOut(BaseModel):
-    date_ist: str
-    version: int
-    created_at: str
-    script: ScriptV2
+# ── B-Roll Test ───────────────────────────────────────────────────────────────
+
+class BRollTestSectionOut(BaseModel):
+    section_index: int
+    section_name: str
+    prompt: str
+    duration_s: float
+    success: bool
+    file_name: str | None = None
+    error: str | None = None
 
 
-class TeleprompterOut(BaseModel):
-    date_ist: str
-    version: int
-    sections: list[ScriptSectionV2]
-
-
-class PipelineTriggerOut(BaseModel):
-    date_ist: str
-    clip_count: int
-    status: str
-    output_path: str | None
-    message: str
+class BRollTestStatusOut(BaseModel):
+    status: str | None
+    date_ist: str | None = None
+    results: list[BRollTestSectionOut] = []
+    logs: list[str] = []

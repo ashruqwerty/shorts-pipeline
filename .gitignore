@@ -2,6 +2,8 @@
 .env
 backend/.env
 frontend_rn/.env
+backend/vertex_key.json
+backend/yt_cookies.txt
 
 # ── Local runtime data ──────────────────────────────────────────────────────
 local_storage/

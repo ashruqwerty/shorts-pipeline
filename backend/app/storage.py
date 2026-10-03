@@ -34,13 +34,11 @@ def init_db() -> None:
             )
             """
         )
-        # Idempotent migration: add section_index to tables created before F001
-        existing_cols = {
-            row[1]
-            for row in conn.execute("PRAGMA table_info(assets)").fetchall()
-        }
-        if "section_index" not in existing_cols:
+        # Migrate existing databases that lack section_index column.
+        try:
             conn.execute("ALTER TABLE assets ADD COLUMN section_index INTEGER")
+        except Exception:
+            pass
 
 
 def _safe_suffix(filename: str) -> str:
