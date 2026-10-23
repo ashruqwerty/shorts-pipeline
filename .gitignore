@@ -17,9 +17,14 @@ __pycache__/
 dist/
 build/
 .venv/
+.venv310/
+backend/.venv310/
 venv/
 env/
 *.egg
+
+# ── Local dev tools (downloaded binaries, not source) ─────────────────────────
+.tools/
 
 # ── Node / Expo ──────────────────────────────────────────────────────────────
 node_modules/
@@ -28,6 +33,7 @@ frontend_rn/.expo/
 frontend_rn/dist/
 frontend_rn/web-build/
 frontend_rn/.env.local
+frontend_rn/.verify-bundle/
 .expo/
 
 # ── Expo native builds ───────────────────────────────────────────────────────

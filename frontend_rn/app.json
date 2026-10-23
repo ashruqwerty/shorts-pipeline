@@ -6,6 +6,12 @@
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "platforms": ["android", "ios", "web"],
+    "ios": {
+      "bundleIdentifier": "com.ashwrathore.shortscreator"
+    },
+    "android": {
+      "package": "com.ashwrathore.shortscreator"
+    },
     "web": {
       "bundler": "metro"
     }

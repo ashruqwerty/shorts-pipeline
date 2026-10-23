@@ -223,6 +223,12 @@ function parseTextWithCues(text: string): TextSegment[] {
 
 const LIGHT_CUES = new Set(["EMPHASIZE", "BREATHE", "HIGH", "NORMAL", "PAUSE"]);
 
+// V1 scope: the in-app camera recorder has never been tested on any platform (it was
+// hidden on web via Platform.OS, and never exercised on a device either — every a-roll
+// so far was recorded externally and uploaded via the Assets tab). Keep it hidden on
+// native too until it's actually been tried, tracked for V2 in specs/F014_mobile_app_plan.md.
+const FEATURE_IN_APP_RECORDER = false;
+
 function InlineCuedText({ text, fontSize }: { text: string; fontSize: number }) {
   const segments = parseTextWithCues(text);
   return (
@@ -300,6 +306,7 @@ function EpisodePlanPopup({
   seriesName,
   onItemUpdated,
   onPlanSaved,
+  onScriptGenerated,
 }: {
   visible: boolean;
   onClose: () => void;
@@ -310,6 +317,9 @@ function EpisodePlanPopup({
   onPlanSaved: (updatedDraft: SeriesDraft) => void;
   onScriptGenerated: (dayOffset: number, scriptJson: string) => void;
 }) {
+  const { width } = useWindowDimensions();
+  const isWide = width > 800;
+  const [phoneTab, setPhoneTab] = useState<"plan" | "chat" | "script">("chat");
   const [messages, setMessages] = useState<EpisodePlanMessage[]>([]);
   const [input, setInput] = useState("");
   const [thinking, setThinking] = useState(false);
@@ -469,245 +479,299 @@ function EpisodePlanPopup({
     story_turn: "#b45309", takeaway: "#15803d", cta: "#6b7280",
   };
 
-  // Popup expands: chat-only → plan+chat → plan+chat+script
-  const maxWidth = (hasSavedPlan ? 240 : 0) + 480 + (hasScript && !!scriptSections ? 420 : 0);
+  // Desktop: popup expands chat-only → plan+chat → plan+chat+script, side by side.
+  // Phone: panels are never side by side (would overflow a ~375px screen), shown
+  // one at a time via the tab bar instead — see FEATURE_IN_APP_RECORDER's sibling
+  // note in CURRENT_STATE.md / F014 plan for why this file now carries isWide checks.
+  const maxWidth = isWide ? (hasSavedPlan ? 240 : 0) + 480 + (hasScript && !!scriptSections ? 420 : 0) : 480;
+  const showPlanTab = phoneTab === "plan" && hasSavedPlan;
+  const showScriptTab = phoneTab === "script" && hasScript && !!scriptSections;
+  const showChatTab = !showPlanTab && !showScriptTab; // chat is the fallback/default panel
 
-  return (
-    <Modal visible={visible} transparent animationType="fade" onRequestClose={handleClose}>
-      <Pressable style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.45)", justifyContent: "center", alignItems: "center" }} onPress={handleClose}>
-        <Pressable
-          style={{ width: "96%", maxWidth, maxHeight: "92%", backgroundColor: COLORS.card, borderRadius: 16, overflow: "hidden", shadowColor: "#000", shadowOpacity: 0.25, shadowRadius: 20, elevation: 10, flexDirection: "row" }}
-          onPress={(e) => e.stopPropagation()}
-        >
-
-          {/* ── LEFT PANEL: Saved Plan ── visible after Apply Plan */}
-          {hasSavedPlan && (
-            <View style={{ width: 240, borderRightWidth: 1, borderRightColor: COLORS.border, backgroundColor: "#f0fdf4", flexDirection: "column" }}>
-              <View style={{ paddingHorizontal: 12, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: "#bbf7d0" }}>
-                <Text style={{ fontSize: 10, fontWeight: "800", color: "#166534", letterSpacing: 0.8 }}>AGREED PLAN</Text>
+  const renderPlanPanel = (panelWidth: number | "100%") => (
+    <View style={{ width: panelWidth, borderRightWidth: isWide ? 1 : 0, borderRightColor: COLORS.border, backgroundColor: "#f0fdf4", flexDirection: "column", flex: isWide ? undefined : 1 }}>
+      <View style={{ paddingHorizontal: 12, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: "#bbf7d0" }}>
+        <Text style={{ fontSize: 10, fontWeight: "800", color: "#166534", letterSpacing: 0.8 }}>AGREED PLAN</Text>
+      </View>
+      <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 12, gap: 8 }}>
+        <View style={{ gap: 2, marginBottom: 4 }}>
+          <Text style={{ fontSize: 10, color: "#166534", fontWeight: "700" }}>ANGLE</Text>
+          <Text style={{ fontSize: 11, color: "#14532d", lineHeight: 16 }}>{savedPlan?.angle}</Text>
+        </View>
+        <View style={{ gap: 2, marginBottom: 4 }}>
+          <Text style={{ fontSize: 10, color: "#166534", fontWeight: "700" }}>HOOK</Text>
+          <Text style={{ fontSize: 11, color: "#14532d", lineHeight: 16 }}>{savedPlan?.hook}</Text>
+        </View>
+        <View style={{ height: 1, backgroundColor: "#bbf7d0", marginVertical: 2 }} />
+        {savedPlan && Object.entries(savedPlan.sections).map(([key, val]) => (
+          <View key={key} style={{ gap: 1 }}>
+            <Text style={{ fontSize: 9, color: "#166534", fontWeight: "800", letterSpacing: 0.5, textTransform: "uppercase" }}>{key.replace("_", " ")}</Text>
+            <Text style={{ fontSize: 11, color: "#14532d", lineHeight: 16 }}>{val}</Text>
+          </View>
+        ))}
+        {savedPlan?.research_checklist?.length > 0 && (
+          <View style={{ marginTop: 6, gap: 4 }}>
+            <View style={{ height: 1, backgroundColor: "#bbf7d0" }} />
+            <Text style={{ fontSize: 9, fontWeight: "800", color: "#166534", letterSpacing: 0.5 }}>RESEARCH</Text>
+            {savedPlan.research_checklist.map((pt, j) => (
+              <View key={j} style={{ flexDirection: "row", gap: 5, alignItems: "flex-start" }}>
+                <Text style={{ fontSize: 10, color: "#16a34a", fontWeight: "800" }}>·</Text>
+                <Text style={{ fontSize: 10, color: "#14532d", flex: 1, lineHeight: 15 }}>{pt}</Text>
               </View>
-              <ScrollView contentContainerStyle={{ padding: 12, gap: 8 }}>
-                <View style={{ gap: 2, marginBottom: 4 }}>
-                  <Text style={{ fontSize: 10, color: "#166534", fontWeight: "700" }}>ANGLE</Text>
-                  <Text style={{ fontSize: 11, color: "#14532d", lineHeight: 16 }}>{savedPlan.angle}</Text>
-                </View>
-                <View style={{ gap: 2, marginBottom: 4 }}>
-                  <Text style={{ fontSize: 10, color: "#166534", fontWeight: "700" }}>HOOK</Text>
-                  <Text style={{ fontSize: 11, color: "#14532d", lineHeight: 16 }}>{savedPlan.hook}</Text>
-                </View>
-                <View style={{ height: 1, backgroundColor: "#bbf7d0", marginVertical: 2 }} />
-                {Object.entries(savedPlan.sections).map(([key, val]) => (
-                  <View key={key} style={{ gap: 1 }}>
-                    <Text style={{ fontSize: 9, color: "#166534", fontWeight: "800", letterSpacing: 0.5, textTransform: "uppercase" }}>{key.replace("_", " ")}</Text>
-                    <Text style={{ fontSize: 11, color: "#14532d", lineHeight: 16 }}>{val}</Text>
-                  </View>
-                ))}
-                {savedPlan.research_checklist?.length > 0 && (
-                  <View style={{ marginTop: 6, gap: 4 }}>
-                    <View style={{ height: 1, backgroundColor: "#bbf7d0" }} />
-                    <Text style={{ fontSize: 9, fontWeight: "800", color: "#166534", letterSpacing: 0.5 }}>RESEARCH</Text>
-                    {savedPlan.research_checklist.map((pt, j) => (
-                      <View key={j} style={{ flexDirection: "row", gap: 5, alignItems: "flex-start" }}>
-                        <Text style={{ fontSize: 10, color: "#16a34a", fontWeight: "800" }}>·</Text>
-                        <Text style={{ fontSize: 10, color: "#14532d", flex: 1, lineHeight: 15 }}>{pt}</Text>
-                      </View>
-                    ))}
-                  </View>
-                )}
-              </ScrollView>
+            ))}
+          </View>
+        )}
+      </ScrollView>
+    </View>
+  );
+
+  const renderChatPanel = (panelWidth: number | "100%") => (
+    <View style={{ width: panelWidth, flexDirection: "column", flex: isWide ? undefined : 1, borderRightWidth: isWide && hasScript && !!scriptSections ? 1 : 0, borderRightColor: COLORS.border }}>
+
+      {/* Header — close button lives here; on phone it's always reachable because
+          the tab bar (rendered outside this panel) stays visible across tabs. */}
+      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 14, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: COLORS.border, backgroundColor: "#fafaf9" }}>
+        <View style={{ flex: 1, gap: 2 }}>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+            <View style={{ width: 24, height: 24, borderRadius: 12, backgroundColor: COLORS.accent, alignItems: "center", justifyContent: "center" }}>
+              <Text style={{ color: "#fff", fontSize: 11, fontWeight: "800" }}>{item.day_offset}</Text>
             </View>
-          )}
+            <Text style={{ fontWeight: "800", fontSize: 15, color: COLORS.text, flex: 1 }}>{item.sub_topic}</Text>
+            {savedPlan && (
+              <View style={{ backgroundColor: "#dcfce7", borderRadius: 6, paddingHorizontal: 6, paddingVertical: 2 }}>
+                <Text style={{ fontSize: 10, color: "#166534", fontWeight: "700" }}>✓ PLANNED</Text>
+              </View>
+            )}
+          </View>
+          <Text style={{ fontSize: 11, color: COLORS.muted, marginLeft: 32 }}>{seriesName} · {item.category}</Text>
+        </View>
+        {isWide && (
+          <Pressable onPress={handleClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }} style={{ padding: 4 }}>
+            <Text style={{ fontSize: 20, color: COLORS.muted }}>×</Text>
+          </Pressable>
+        )}
+      </View>
 
-          {/* ── MIDDLE PANEL: Chat (always visible) ── */}
-          <View style={{ width: 480, flexDirection: "column", borderRightWidth: hasScript && !!scriptSections ? 1 : 0, borderRightColor: COLORS.border }}>
+      {/* Angle + hook strip */}
+      <View style={{ paddingHorizontal: 14, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: COLORS.border, gap: 3 }}>
+        <Text style={{ fontSize: 12, color: COLORS.text }} numberOfLines={2}><Text style={{ fontWeight: "700" }}>Angle: </Text>{pendingUpdate?.angle ?? pendingPlan?.angle ?? item.topic_angle}</Text>
+        <Text style={{ fontSize: 12, color: COLORS.muted, fontStyle: "italic" }} numberOfLines={2}><Text style={{ fontWeight: "700", fontStyle: "normal" }}>Hook: </Text>{pendingUpdate?.hook ?? pendingPlan?.hook ?? item.hook_idea}</Text>
+      </View>
 
-            {/* Header */}
-            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 14, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: COLORS.border, backgroundColor: "#fafaf9" }}>
-              <View style={{ flex: 1, gap: 2 }}>
-                <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                  <View style={{ width: 24, height: 24, borderRadius: 12, backgroundColor: COLORS.accent, alignItems: "center", justifyContent: "center" }}>
-                    <Text style={{ color: "#fff", fontSize: 11, fontWeight: "800" }}>{item.day_offset}</Text>
+      {/* Apply Plan banner */}
+      {pendingPlan && (
+        <View style={{ backgroundColor: "#fffbeb", paddingHorizontal: 14, paddingVertical: 8, flexDirection: "row", alignItems: "center", justifyContent: "space-between", borderBottomWidth: 1, borderBottomColor: "#fde68a" }}>
+          <Text style={{ fontSize: 12, color: "#92400e", fontWeight: "600" }}>Plan ready — apply to save it</Text>
+          <Pressable onPress={applyPlan} disabled={saving} style={{ backgroundColor: "#92400e", borderRadius: 8, paddingHorizontal: 12, paddingVertical: 5, opacity: saving ? 0.5 : 1 }}>
+            {saving ? <ActivityIndicator color="#fff" size="small" /> : <Text style={{ color: "#fff", fontSize: 12, fontWeight: "700" }}>Apply Plan</Text>}
+          </Pressable>
+        </View>
+      )}
+
+      {/* Generate Script button — only when plan saved, no script yet */}
+      {hasSavedPlan && !hasScript && (
+        <View style={{ paddingHorizontal: 14, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: "#dbeafe", backgroundColor: "#eff6ff" }}>
+          <Pressable
+            onPress={handleGenerateScript}
+            disabled={generatingScript}
+            style={{ backgroundColor: "#1d4ed8", borderRadius: 10, paddingVertical: 11, alignItems: "center", flexDirection: "row", justifyContent: "center", gap: 8, opacity: generatingScript ? 0.6 : 1 }}
+          >
+            {generatingScript ? <ActivityIndicator color="#fff" size="small" /> : <Text style={{ fontSize: 14 }}>✨</Text>}
+            <Text style={{ color: "#fff", fontWeight: "800", fontSize: 13 }}>
+              {generatingScript ? "Generating 90s Script…" : "Generate 90-second Script"}
+            </Text>
+          </Pressable>
+        </View>
+      )}
+
+      {/* Chat messages */}
+      <ScrollView ref={scrollRef} style={{ flex: 1 }} contentContainerStyle={{ padding: 12, gap: 8 }} onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: false })}>
+        {messages.length === 0 && thinking && (
+          <View style={{ alignItems: "flex-start" }}>
+            <View style={{ backgroundColor: COLORS.bg, borderRadius: 12, padding: 12, borderWidth: 1, borderColor: COLORS.border, flexDirection: "row", alignItems: "center", gap: 8 }}>
+              <ActivityIndicator color={COLORS.accent} size="small" />
+              <Text style={{ fontSize: 13, color: COLORS.muted }}>Planning overview…</Text>
+            </View>
+          </View>
+        )}
+        {messages.map((msg, i) => (
+          <View key={i} style={{ alignItems: msg.role === "user" ? "flex-end" : "flex-start" }}>
+            <View style={{ maxWidth: "90%", backgroundColor: msg.role === "user" ? COLORS.accent : COLORS.bg, borderRadius: 12, padding: 10, borderWidth: msg.role === "user" ? 0 : 1, borderColor: msg.action === "rejected" ? "#fca5a5" : COLORS.border }}>
+              <Text style={{ fontSize: 13, color: msg.role === "user" ? "#fff" : COLORS.text, lineHeight: 19 }}>{msg.content}</Text>
+              {msg.keyPoints && msg.keyPoints.length > 0 && (
+                <View style={{ marginTop: 8, gap: 3 }}>
+                  <Text style={{ fontSize: 11, fontWeight: "700", color: COLORS.muted, letterSpacing: 0.5 }}>RESEARCH CHECKLIST</Text>
+                  {msg.keyPoints.map((pt, j) => (
+                    <View key={j} style={{ flexDirection: "row", gap: 5, alignItems: "flex-start" }}>
+                      <Text style={{ fontSize: 11, color: COLORS.accent, fontWeight: "800", marginTop: 1 }}>·</Text>
+                      <Text style={{ fontSize: 12, color: COLORS.text, flex: 1 }}>{pt}</Text>
+                    </View>
+                  ))}
+                </View>
+              )}
+            </View>
+          </View>
+        ))}
+        {thinking && messages.length > 0 && (
+          <View style={{ alignItems: "flex-start" }}>
+            <View style={{ backgroundColor: COLORS.bg, borderRadius: 12, padding: 10, borderWidth: 1, borderColor: COLORS.border }}>
+              <ActivityIndicator color={COLORS.accent} size="small" />
+            </View>
+          </View>
+        )}
+      </ScrollView>
+
+      {/* Input */}
+      <View style={{ flexDirection: "row", gap: 8, padding: 10, borderTopWidth: 1, borderTopColor: COLORS.border, backgroundColor: COLORS.card }}>
+        <TextInput
+          style={{ flex: 1, borderWidth: 1, borderColor: COLORS.border, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8, fontSize: 13, color: COLORS.text, backgroundColor: COLORS.bg, minHeight: 38, maxHeight: 80 }}
+          value={input}
+          onChangeText={setInput}
+          placeholder="Make the angle more dramatic, focus on the founder story…"
+          placeholderTextColor={COLORS.muted}
+          multiline
+          onSubmitEditing={() => sendMessage(input)}
+        />
+        <Pressable
+          onPress={() => sendMessage(input)}
+          disabled={thinking || !input.trim()}
+          style={{ backgroundColor: COLORS.accent, borderRadius: 10, paddingHorizontal: 12, justifyContent: "center", opacity: (thinking || !input.trim()) ? 0.4 : 1 }}>
+          <Text style={{ color: "#fff", fontWeight: "700", fontSize: 13 }}>Send</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+
+  const renderScriptPanel = (panelWidth: number | "100%") => (
+    <View style={{ width: panelWidth, flexDirection: "column", backgroundColor: "#f8faff", flex: isWide ? undefined : 1 }}>
+      {/* Panel header */}
+      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 14, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: "#dbeafe", backgroundColor: "#eff6ff" }}>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 7 }}>
+          <Text style={{ fontSize: 14 }}>📝</Text>
+          <Text style={{ fontSize: 13, fontWeight: "800", color: "#1d4ed8" }}>Script Preview</Text>
+          <View style={{ backgroundColor: "#dbeafe", borderRadius: 4, paddingHorizontal: 6, paddingVertical: 1 }}>
+            <Text style={{ fontSize: 10, color: "#1d4ed8", fontWeight: "700" }}>READY</Text>
+          </View>
+        </View>
+        <Pressable
+          onPress={handleGenerateScript}
+          disabled={generatingScript}
+          style={{ flexDirection: "row", alignItems: "center", gap: 5, backgroundColor: "#1d4ed8", borderRadius: 7, paddingHorizontal: 10, paddingVertical: 5, opacity: generatingScript ? 0.6 : 1 }}
+        >
+          {generatingScript ? <ActivityIndicator color="#fff" size="small" /> : null}
+          <Text style={{ color: "#fff", fontSize: 11, fontWeight: "700" }}>
+            {generatingScript ? "Regenerating…" : "Regenerate"}
+          </Text>
+        </Pressable>
+      </View>
+
+      {/* Section cards — full height, own scroll */}
+      <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 12, gap: 10 }}>
+        {(scriptSections ?? []).map((sec: any) => (
+          <View key={sec.index} style={{ borderRadius: 10, overflow: "hidden", borderWidth: 1, borderColor: "#dbeafe" }}>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 12, paddingVertical: 8, backgroundColor: SECTION_COLORS[sec.name] ?? "#6b7280" }}>
+              <View style={{ backgroundColor: "rgba(255,255,255,0.25)", borderRadius: 4, paddingHorizontal: 6, paddingVertical: 2 }}>
+                <Text style={{ fontSize: 10, color: "#fff", fontWeight: "800" }}>{sec.timing.start_s}s – {sec.timing.end_s}s</Text>
+              </View>
+              <Text style={{ fontSize: 12, color: "#fff", fontWeight: "800", textTransform: "uppercase", letterSpacing: 0.5 }}>{sec.label}</Text>
+              <Text style={{ fontSize: 10, color: "rgba(255,255,255,0.7)", marginLeft: "auto" }}>{sec.word_count}w · {sec.shot_type}</Text>
+            </View>
+            <View style={{ padding: 12, backgroundColor: "#fff", gap: 6 }}>
+              <Text style={{ fontSize: 13, color: "#1e293b", lineHeight: 20 }}>{sec.plain_text}</Text>
+              {sec.b_roll_prompt ? (
+                <View style={{ gap: 6 }}>
+                  <View style={{ backgroundColor: "#faf5ff", borderRadius: 6, padding: 8, borderLeftWidth: 3, borderLeftColor: "#7c3aed" }}>
+                    <Text style={{ fontSize: 10, color: "#7c3aed", fontWeight: "700", marginBottom: 2 }}>B-ROLL CONCEPT</Text>
+                    <Text style={{ fontSize: 11, color: "#4c1d95" }}>{sec.b_roll_prompt}</Text>
                   </View>
-                  <Text style={{ fontWeight: "800", fontSize: 15, color: COLORS.text, flex: 1 }}>{item.sub_topic}</Text>
-                  {savedPlan && (
-                    <View style={{ backgroundColor: "#dcfce7", borderRadius: 6, paddingHorizontal: 6, paddingVertical: 2 }}>
-                      <Text style={{ fontSize: 10, color: "#166534", fontWeight: "700" }}>✓ PLANNED</Text>
+                  <Pressable
+                    onPress={() => onPreviewVeoPrompt(sec.index)}
+                    disabled={veoPromptLoading === sec.index}
+                    style={{ flexDirection: "row", alignItems: "center", gap: 5, backgroundColor: "#f3f0ff", borderRadius: 6, paddingVertical: 5, paddingHorizontal: 8, alignSelf: "flex-start", opacity: veoPromptLoading === sec.index ? 0.6 : 1 }}
+                  >
+                    {veoPromptLoading === sec.index
+                      ? <ActivityIndicator size="small" color="#7c3aed" />
+                      : <Text style={{ fontSize: 11 }}>✨</Text>}
+                    <Text style={{ fontSize: 10, color: "#7c3aed", fontWeight: "700" }}>
+                      {veoPromptLoading === sec.index ? "Building Veo prompt…" : "Preview Veo Prompt"}
+                    </Text>
+                  </Pressable>
+                  {veoPromptResult[sec.index] && (
+                    <View style={{ backgroundColor: "#1e1035", borderRadius: 8, padding: 10, gap: 6 }}>
+                      <Text style={{ fontSize: 10, color: "#a78bfa", fontWeight: "700" }}>✨ GEMINI-GENERATED VEO PROMPT</Text>
+                      <Text style={{ fontSize: 11, color: "#e9d5ff", lineHeight: 17 }}>{veoPromptResult[sec.index].veo_prompt}</Text>
+                      <Text style={{ fontSize: 9, color: "#6b7280", marginTop: 2 }}>Narration used: {veoPromptResult[sec.index].narration.slice(0, 80)}…</Text>
                     </View>
                   )}
                 </View>
-                <Text style={{ fontSize: 11, color: COLORS.muted, marginLeft: 32 }}>{seriesName} · {item.category}</Text>
-              </View>
-              <Pressable onPress={handleClose} style={{ padding: 4 }}>
-                <Text style={{ fontSize: 20, color: COLORS.muted }}>×</Text>
-              </Pressable>
-            </View>
-
-            {/* Angle + hook strip */}
-            <View style={{ paddingHorizontal: 14, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: COLORS.border, gap: 3 }}>
-              <Text style={{ fontSize: 12, color: COLORS.text }} numberOfLines={2}><Text style={{ fontWeight: "700" }}>Angle: </Text>{pendingUpdate?.angle ?? pendingPlan?.angle ?? item.topic_angle}</Text>
-              <Text style={{ fontSize: 12, color: COLORS.muted, fontStyle: "italic" }} numberOfLines={2}><Text style={{ fontWeight: "700", fontStyle: "normal" }}>Hook: </Text>{pendingUpdate?.hook ?? pendingPlan?.hook ?? item.hook_idea}</Text>
-            </View>
-
-            {/* Apply Plan banner */}
-            {pendingPlan && (
-              <View style={{ backgroundColor: "#fffbeb", paddingHorizontal: 14, paddingVertical: 8, flexDirection: "row", alignItems: "center", justifyContent: "space-between", borderBottomWidth: 1, borderBottomColor: "#fde68a" }}>
-                <Text style={{ fontSize: 12, color: "#92400e", fontWeight: "600" }}>Plan ready — apply to save it</Text>
-                <Pressable onPress={applyPlan} disabled={saving} style={{ backgroundColor: "#92400e", borderRadius: 8, paddingHorizontal: 12, paddingVertical: 5, opacity: saving ? 0.5 : 1 }}>
-                  {saving ? <ActivityIndicator color="#fff" size="small" /> : <Text style={{ color: "#fff", fontSize: 12, fontWeight: "700" }}>Apply Plan</Text>}
-                </Pressable>
-              </View>
-            )}
-
-            {/* Generate Script button — only when plan saved, no script yet */}
-            {hasSavedPlan && !hasScript && (
-              <View style={{ paddingHorizontal: 14, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: "#dbeafe", backgroundColor: "#eff6ff" }}>
-                <Pressable
-                  onPress={handleGenerateScript}
-                  disabled={generatingScript}
-                  style={{ backgroundColor: "#1d4ed8", borderRadius: 10, paddingVertical: 11, alignItems: "center", flexDirection: "row", justifyContent: "center", gap: 8, opacity: generatingScript ? 0.6 : 1 }}
-                >
-                  {generatingScript ? <ActivityIndicator color="#fff" size="small" /> : <Text style={{ fontSize: 14 }}>✨</Text>}
-                  <Text style={{ color: "#fff", fontWeight: "800", fontSize: 13 }}>
-                    {generatingScript ? "Generating 90s Script…" : "Generate 90-second Script"}
-                  </Text>
-                </Pressable>
-              </View>
-            )}
-
-            {/* Chat messages */}
-            <ScrollView ref={scrollRef} style={{ flex: 1 }} contentContainerStyle={{ padding: 12, gap: 8 }} onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: false })}>
-              {messages.length === 0 && thinking && (
-                <View style={{ alignItems: "flex-start" }}>
-                  <View style={{ backgroundColor: COLORS.bg, borderRadius: 12, padding: 12, borderWidth: 1, borderColor: COLORS.border, flexDirection: "row", alignItems: "center", gap: 8 }}>
-                    <ActivityIndicator color={COLORS.accent} size="small" />
-                    <Text style={{ fontSize: 13, color: COLORS.muted }}>Planning overview…</Text>
-                  </View>
+              ) : null}
+              {sec.on_screen_text ? (
+                <View style={{ backgroundColor: "#f0f9ff", borderRadius: 6, padding: 8, borderLeftWidth: 3, borderLeftColor: "#0891b2" }}>
+                  <Text style={{ fontSize: 10, color: "#0891b2", fontWeight: "700", marginBottom: 2 }}>ON-SCREEN</Text>
+                  <Text style={{ fontSize: 11, color: "#0e4f6b" }}>{sec.on_screen_text}</Text>
                 </View>
-              )}
-              {messages.map((msg, i) => (
-                <View key={i} style={{ alignItems: msg.role === "user" ? "flex-end" : "flex-start" }}>
-                  <View style={{ maxWidth: "90%", backgroundColor: msg.role === "user" ? COLORS.accent : COLORS.bg, borderRadius: 12, padding: 10, borderWidth: msg.role === "user" ? 0 : 1, borderColor: msg.action === "rejected" ? "#fca5a5" : COLORS.border }}>
-                    <Text style={{ fontSize: 13, color: msg.role === "user" ? "#fff" : COLORS.text, lineHeight: 19 }}>{msg.content}</Text>
-                    {msg.keyPoints && msg.keyPoints.length > 0 && (
-                      <View style={{ marginTop: 8, gap: 3 }}>
-                        <Text style={{ fontSize: 11, fontWeight: "700", color: COLORS.muted, letterSpacing: 0.5 }}>RESEARCH CHECKLIST</Text>
-                        {msg.keyPoints.map((pt, j) => (
-                          <View key={j} style={{ flexDirection: "row", gap: 5, alignItems: "flex-start" }}>
-                            <Text style={{ fontSize: 11, color: COLORS.accent, fontWeight: "800", marginTop: 1 }}>·</Text>
-                            <Text style={{ fontSize: 12, color: COLORS.text, flex: 1 }}>{pt}</Text>
-                          </View>
-                        ))}
-                      </View>
-                    )}
-                  </View>
-                </View>
-              ))}
-              {thinking && messages.length > 0 && (
-                <View style={{ alignItems: "flex-start" }}>
-                  <View style={{ backgroundColor: COLORS.bg, borderRadius: 12, padding: 10, borderWidth: 1, borderColor: COLORS.border }}>
-                    <ActivityIndicator color={COLORS.accent} size="small" />
-                  </View>
-                </View>
-              )}
-            </ScrollView>
-
-            {/* Input */}
-            <View style={{ flexDirection: "row", gap: 8, padding: 10, borderTopWidth: 1, borderTopColor: COLORS.border, backgroundColor: COLORS.card }}>
-              <TextInput
-                style={{ flex: 1, borderWidth: 1, borderColor: COLORS.border, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8, fontSize: 13, color: COLORS.text, backgroundColor: COLORS.bg, minHeight: 38, maxHeight: 80 }}
-                value={input}
-                onChangeText={setInput}
-                placeholder="Make the angle more dramatic, focus on the founder story…"
-                placeholderTextColor={COLORS.muted}
-                multiline
-                onSubmitEditing={() => sendMessage(input)}
-              />
-              <Pressable
-                onPress={() => sendMessage(input)}
-                disabled={thinking || !input.trim()}
-                style={{ backgroundColor: COLORS.accent, borderRadius: 10, paddingHorizontal: 12, justifyContent: "center", opacity: (thinking || !input.trim()) ? 0.4 : 1 }}>
-                <Text style={{ color: "#fff", fontWeight: "700", fontSize: 13 }}>Send</Text>
-              </Pressable>
+              ) : null}
             </View>
           </View>
+        ))}
+      </ScrollView>
+    </View>
+  );
 
-          {/* ── RIGHT PANEL: Script Preview ── visible after Generate Script */}
-          {hasScript && scriptSections && (
-            <View style={{ width: 420, flexDirection: "column", backgroundColor: "#f8faff" }}>
-              {/* Panel header */}
-              <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 14, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: "#dbeafe", backgroundColor: "#eff6ff" }}>
-                <View style={{ flexDirection: "row", alignItems: "center", gap: 7 }}>
-                  <Text style={{ fontSize: 14 }}>📝</Text>
-                  <Text style={{ fontSize: 13, fontWeight: "800", color: "#1d4ed8" }}>Script Preview</Text>
-                  <View style={{ backgroundColor: "#dbeafe", borderRadius: 4, paddingHorizontal: 6, paddingVertical: 1 }}>
-                    <Text style={{ fontSize: 10, color: "#1d4ed8", fontWeight: "700" }}>READY</Text>
-                  </View>
-                </View>
-                <Pressable
-                  onPress={handleGenerateScript}
-                  disabled={generatingScript}
-                  style={{ flexDirection: "row", alignItems: "center", gap: 5, backgroundColor: "#1d4ed8", borderRadius: 7, paddingHorizontal: 10, paddingVertical: 5, opacity: generatingScript ? 0.6 : 1 }}
-                >
-                  {generatingScript ? <ActivityIndicator color="#fff" size="small" /> : null}
-                  <Text style={{ color: "#fff", fontSize: 11, fontWeight: "700" }}>
-                    {generatingScript ? "Regenerating…" : "Regenerate"}
-                  </Text>
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={handleClose}>
+      <Pressable style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.45)", justifyContent: isWide ? "center" : "flex-end", alignItems: "center" }} onPress={handleClose}>
+        {/* Plain View, not Pressable — a scrollable chat lives inside this card,
+            and wrapping it in a Pressable (even one that just stops propagation)
+            can intercept/swallow the ScrollView's drag gesture on Android before
+            it ever starts a scroll. Tap-outside-to-close still works via the
+            backdrop Pressable above: RN's responder system gives priority to the
+            more specific nested interactive descendant (ScrollView/inputs/buttons)
+            over this ancestor, since this View itself claims no responder at all. */}
+        <View
+          style={
+            isWide
+              ? { width: "96%", maxWidth, maxHeight: "92%", backgroundColor: COLORS.card, borderRadius: 16, overflow: "hidden", shadowColor: "#000", shadowOpacity: 0.25, shadowRadius: 20, elevation: 10, flexDirection: "row" }
+              : { width: "100%", height: "94%", backgroundColor: COLORS.card, borderTopLeftRadius: 20, borderTopRightRadius: 20, overflow: "hidden", flexDirection: "column" }
+          }
+        >
+          {isWide ? (
+            <>
+              {hasSavedPlan && renderPlanPanel(240)}
+              {renderChatPanel(480)}
+              {hasScript && scriptSections && renderScriptPanel(420)}
+            </>
+          ) : (
+            <>
+              {/* Phone tab bar — only one panel is ever shown at a time, since side-by-side
+                  panels would overflow a phone screen. Close button lives here so it stays
+                  reachable regardless of which tab is active. */}
+              <View style={{ flexDirection: "row", alignItems: "center", borderBottomWidth: 1, borderBottomColor: COLORS.border, backgroundColor: "#fafaf9" }}>
+                {hasSavedPlan && (
+                  <Pressable onPress={() => setPhoneTab("plan")} style={{ paddingHorizontal: 14, paddingVertical: 10, borderBottomWidth: 2, borderBottomColor: showPlanTab ? COLORS.accent : "transparent" }}>
+                    <Text style={{ fontSize: 12, fontWeight: "700", color: showPlanTab ? COLORS.accent : COLORS.muted }}>Plan</Text>
+                  </Pressable>
+                )}
+                <Pressable onPress={() => setPhoneTab("chat")} style={{ paddingHorizontal: 14, paddingVertical: 10, borderBottomWidth: 2, borderBottomColor: showChatTab ? COLORS.accent : "transparent" }}>
+                  <Text style={{ fontSize: 12, fontWeight: "700", color: showChatTab ? COLORS.accent : COLORS.muted }}>Chat</Text>
+                </Pressable>
+                {hasScript && !!scriptSections && (
+                  <Pressable onPress={() => setPhoneTab("script")} style={{ paddingHorizontal: 14, paddingVertical: 10, borderBottomWidth: 2, borderBottomColor: showScriptTab ? COLORS.accent : "transparent" }}>
+                    <Text style={{ fontSize: 12, fontWeight: "700", color: showScriptTab ? COLORS.accent : COLORS.muted }}>Script</Text>
+                  </Pressable>
+                )}
+                <Pressable onPress={handleClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }} style={{ marginLeft: "auto", paddingHorizontal: 14, paddingVertical: 10 }}>
+                  <Text style={{ fontSize: 20, color: COLORS.muted }}>×</Text>
                 </Pressable>
               </View>
-
-              {/* Section cards — full height, own scroll */}
-              <ScrollView contentContainerStyle={{ padding: 12, gap: 10 }}>
-                {scriptSections.map((sec: any) => (
-                  <View key={sec.index} style={{ borderRadius: 10, overflow: "hidden", borderWidth: 1, borderColor: "#dbeafe" }}>
-                    <View style={{ flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 12, paddingVertical: 8, backgroundColor: SECTION_COLORS[sec.name] ?? "#6b7280" }}>
-                      <View style={{ backgroundColor: "rgba(255,255,255,0.25)", borderRadius: 4, paddingHorizontal: 6, paddingVertical: 2 }}>
-                        <Text style={{ fontSize: 10, color: "#fff", fontWeight: "800" }}>{sec.timing.start_s}s – {sec.timing.end_s}s</Text>
-                      </View>
-                      <Text style={{ fontSize: 12, color: "#fff", fontWeight: "800", textTransform: "uppercase", letterSpacing: 0.5 }}>{sec.label}</Text>
-                      <Text style={{ fontSize: 10, color: "rgba(255,255,255,0.7)", marginLeft: "auto" }}>{sec.word_count}w · {sec.shot_type}</Text>
-                    </View>
-                    <View style={{ padding: 12, backgroundColor: "#fff", gap: 6 }}>
-                      <Text style={{ fontSize: 13, color: "#1e293b", lineHeight: 20 }}>{sec.plain_text}</Text>
-                      {sec.b_roll_prompt ? (
-                        <View style={{ gap: 6 }}>
-                          <View style={{ backgroundColor: "#faf5ff", borderRadius: 6, padding: 8, borderLeftWidth: 3, borderLeftColor: "#7c3aed" }}>
-                            <Text style={{ fontSize: 10, color: "#7c3aed", fontWeight: "700", marginBottom: 2 }}>B-ROLL CONCEPT</Text>
-                            <Text style={{ fontSize: 11, color: "#4c1d95" }}>{sec.b_roll_prompt}</Text>
-                          </View>
-                          <Pressable
-                            onPress={() => onPreviewVeoPrompt(sec.index)}
-                            disabled={veoPromptLoading === sec.index}
-                            style={{ flexDirection: "row", alignItems: "center", gap: 5, backgroundColor: "#f3f0ff", borderRadius: 6, paddingVertical: 5, paddingHorizontal: 8, alignSelf: "flex-start", opacity: veoPromptLoading === sec.index ? 0.6 : 1 }}
-                          >
-                            {veoPromptLoading === sec.index
-                              ? <ActivityIndicator size="small" color="#7c3aed" />
-                              : <Text style={{ fontSize: 11 }}>✨</Text>}
-                            <Text style={{ fontSize: 10, color: "#7c3aed", fontWeight: "700" }}>
-                              {veoPromptLoading === sec.index ? "Building Veo prompt…" : "Preview Veo Prompt"}
-                            </Text>
-                          </Pressable>
-                          {veoPromptResult[sec.index] && (
-                            <View style={{ backgroundColor: "#1e1035", borderRadius: 8, padding: 10, gap: 6 }}>
-                              <Text style={{ fontSize: 10, color: "#a78bfa", fontWeight: "700" }}>✨ GEMINI-GENERATED VEO PROMPT</Text>
-                              <Text style={{ fontSize: 11, color: "#e9d5ff", lineHeight: 17 }}>{veoPromptResult[sec.index].veo_prompt}</Text>
-                              <Text style={{ fontSize: 9, color: "#6b7280", marginTop: 2 }}>Narration used: {veoPromptResult[sec.index].narration.slice(0, 80)}…</Text>
-                            </View>
-                          )}
-                        </View>
-                      ) : null}
-                      {sec.on_screen_text ? (
-                        <View style={{ backgroundColor: "#f0f9ff", borderRadius: 6, padding: 8, borderLeftWidth: 3, borderLeftColor: "#0891b2" }}>
-                          <Text style={{ fontSize: 10, color: "#0891b2", fontWeight: "700", marginBottom: 2 }}>ON-SCREEN</Text>
-                          <Text style={{ fontSize: 11, color: "#0e4f6b" }}>{sec.on_screen_text}</Text>
-                        </View>
-                      ) : null}
-                    </View>
-                  </View>
-                ))}
-              </ScrollView>
-            </View>
+              <View style={{ flex: 1 }}>
+                {showPlanTab && renderPlanPanel("100%")}
+                {showScriptTab && renderScriptPanel("100%")}
+                {showChatTab && renderChatPanel("100%")}
+              </View>
+            </>
           )}
-        </Pressable>
+        </View>
       </Pressable>
     </Modal>
   );
@@ -843,10 +907,12 @@ function SectionEditPopup({
         style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.45)", justifyContent: "center", alignItems: "center" }}
         onPress={onClose}
       >
-        {/* Popup card — stop propagation so tapping inside doesn't close */}
-        <Pressable
+        {/* Popup card — plain View, not Pressable: it contains a scrollable chat,
+            and wrapping that in a Pressable can swallow the scroll gesture on
+            Android before it starts. Tap-outside-to-close still works via the
+            backdrop Pressable above. */}
+        <View
           style={{ width: "92%", maxWidth: 520, maxHeight: "82%", backgroundColor: COLORS.card, borderRadius: 16, overflow: "hidden", shadowColor: "#000", shadowOpacity: 0.25, shadowRadius: 20, elevation: 10 }}
-          onPress={(e) => e.stopPropagation()}
         >
           {/* Header */}
           <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 14, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: COLORS.border }}>
@@ -854,7 +920,7 @@ function SectionEditPopup({
               <Text style={{ fontWeight: "800", fontSize: 15, color: COLORS.text }}>{section.label}</Text>
               <Text style={{ fontSize: 11, color: COLORS.muted }}>{section.timing.start_s}–{section.timing.end_s}s · {section.word_count}w</Text>
             </View>
-            <Pressable onPress={onClose} style={{ padding: 4 }}>
+            <Pressable onPress={onClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }} style={{ padding: 4 }}>
               <Text style={{ fontSize: 20, color: COLORS.muted }}>×</Text>
             </Pressable>
           </View>
@@ -957,7 +1023,7 @@ function SectionEditPopup({
               <Text style={{ color: "#fff", fontWeight: "700", fontSize: 13 }}>Send</Text>
             </Pressable>
           </View>
-        </Pressable>
+        </View>
       </Pressable>
     </Modal>
   );
@@ -1154,7 +1220,7 @@ function ScriptDirectorModal({
             <Text style={{ fontWeight: "800", fontSize: 16, color: COLORS.text }}>Script Director</Text>
             <Text style={{ fontSize: 11, color: COLORS.muted }}>v{today?.script_version ?? "?"} · {scriptSections.length} sections · {today?.topic.angle?.slice(0, 40) ?? "Today's script"}</Text>
           </View>
-          <Pressable onPress={onClose} style={{ padding: 6 }}>
+          <Pressable onPress={onClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }} style={{ padding: 6 }}>
             <Text style={{ fontSize: 20, color: COLORS.muted }}>×</Text>
           </Pressable>
         </View>
@@ -2086,7 +2152,7 @@ export default function App() {
                           </View>
                           {i < STEPS.length - 1 && <View style={{ flex: 1, height: 2, backgroundColor: done ? "#166534" : COLORS.border }} />}
                         </View>
-                        <Text style={{ fontSize: 9, color: textColor, marginTop: 4, fontWeight: active ? "700" : "400" }}>{s.label}</Text>
+                        <Text style={{ fontSize: 10, color: textColor, marginTop: 4, fontWeight: active ? "700" : "400" }} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.8}>{s.label}</Text>
                       </View>
                     );
                   })}
@@ -2572,7 +2638,7 @@ export default function App() {
                   </Pressable>
                 </View>
 
-                {Platform.OS !== "web" && (
+                {FEATURE_IN_APP_RECORDER && Platform.OS !== "web" && (
                   <View style={{ flexDirection: "row", gap: 10, alignItems: "center", marginTop: 2 }}>
                     <CameraView ref={cameraRef} mode="video" videoQuality="2160p" facing="front"
                       style={{ width: 110, height: 150, borderRadius: 10, overflow: "hidden", backgroundColor: "#000" }} />
@@ -2661,7 +2727,7 @@ export default function App() {
           <View style={{ backgroundColor: "#fff", borderTopLeftRadius: 20, borderTopRightRadius: 20, maxHeight: "80%", paddingTop: 8 }}>
             <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: COLORS.border }}>
               <Text style={{ fontWeight: "800", fontSize: 17, color: COLORS.text }}>Pick a Different Topic</Text>
-              <Pressable onPress={() => setTopicPickerOpen(false)} style={{ padding: 4 }}>
+              <Pressable onPress={() => setTopicPickerOpen(false)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }} style={{ padding: 4 }}>
                 <Text style={{ fontSize: 20, color: COLORS.muted }}>×</Text>
               </Pressable>
             </View>

@@ -1,7 +1,9 @@
 import concurrent.futures
 import csv
+import difflib
 import json
 import logging
+import math
 import os
 import re
 import sqlite3
@@ -12,6 +14,8 @@ import warnings
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+from pydantic import BaseModel
 
 # Suppress the Gemini SDK's AFC advisory log (it uses logging, not warnings)
 logging.getLogger("google.genai.models").setLevel(logging.ERROR)
@@ -454,8 +458,9 @@ def _call_llm_for_script(assignment: dict[str, Any]) -> dict[str, Any] | None:
                 contents=user_message,
                 config=_genai_module.types.GenerateContentConfig(
                     system_instruction=_LLM_SYSTEM_PROMPT,
-                    max_output_tokens=4096,
+                    max_output_tokens=8192,
                     temperature=1.2,
+                    automatic_function_calling=_genai_module.types.AutomaticFunctionCallingConfig(disable=True),
                 ),
             )
 
@@ -856,6 +861,7 @@ def chat_script(message: str, history: list[dict], scope: str) -> dict[str, Any]
                     system_instruction=system_prompt,
                     max_output_tokens=8192,
                     temperature=1.1,
+                    automatic_function_calling=_genai_module.types.AutomaticFunctionCallingConfig(disable=True),
                 ),
             )
 
@@ -947,6 +953,20 @@ def revert_script_version(date_ist: str, to_version: int) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Series Creator — plan a 10-day content series via chat
 # ---------------------------------------------------------------------------
+
+class _SeriesItemSchema(BaseModel):
+    """Gemini structured-output schema for generate_series. Using response_schema
+    (not text parsing) guarantees syntactically valid JSON — the manual
+    find-brackets-then-json.loads approach kept intermittently failing on
+    unescaped quotes inside Gemini's generated hook/angle text (e.g. a nested
+    quote in a punchy hook line), which no amount of prompt tuning or AFC
+    disabling fully prevented."""
+    day_offset: int
+    sub_topic: str
+    category: str
+    topic_angle: str
+    hook_idea: str
+
 
 _SERIES_GENERATE_PROMPT = """\
 You are a content series planner for a YouTube Shorts creator focused on India-first business, geopolitics, and finance news.
@@ -1053,16 +1073,16 @@ def generate_series(theme: str, day_count: int = 10) -> dict[str, Any]:
                 contents=user_message,
                 config=_genai_module.types.GenerateContentConfig(
                     system_instruction=_SERIES_GENERATE_PROMPT,
-                    max_output_tokens=4096,
+                    max_output_tokens=8192,
                     temperature=1.1,
+                    automatic_function_calling=_genai_module.types.AutomaticFunctionCallingConfig(disable=True),
+                    response_mime_type="application/json",
+                    response_schema=list[_SeriesItemSchema],
                 ),
             )
-        text = response.text or ""
-        start = text.find("[")
-        end = text.rfind("]")
-        if start == -1 or end == -1:
-            raise ValueError("No JSON array in response")
-        items = json.loads(_clean_llm_json(text[start: end + 1]))
+        # response_schema guarantees response.text is valid JSON matching the
+        # schema — no bracket-finding/cleanup needed, and no unescaped-quote risk.
+        items = json.loads(response.text)
     except Exception as exc:
         print(f"[Series] generation failed: {exc}")
         raise ValueError(f"Series generation failed: {exc}") from exc
@@ -1115,8 +1135,9 @@ def chat_series(series_id: str, message: str, history: list[dict]) -> dict[str, 
                 contents=contents,
                 config=_genai_module.types.GenerateContentConfig(
                     system_instruction=system_prompt,
-                    max_output_tokens=4096,
+                    max_output_tokens=8192,
                     temperature=1.0,
+                    automatic_function_calling=_genai_module.types.AutomaticFunctionCallingConfig(disable=True),
                 ),
             )
         text = response.text or ""
@@ -1252,8 +1273,9 @@ def plan_series_episode(series_id: str, day_offset: int, message: str, history: 
                 contents=contents,
                 config=_genai_module.types.GenerateContentConfig(
                     system_instruction=system_prompt,
-                    max_output_tokens=3000,
+                    max_output_tokens=8192,
                     temperature=1.0,
+                    automatic_function_calling=_genai_module.types.AutomaticFunctionCallingConfig(disable=True),
                 ),
             )
         text = response.text or ""
@@ -1369,8 +1391,9 @@ def generate_episode_script(series_id: str, day_offset: int) -> dict[str, Any]:
                 contents=user_message,
                 config=_genai_module.types.GenerateContentConfig(
                     system_instruction=_LLM_SYSTEM_PROMPT,
-                    max_output_tokens=4096,
+                    max_output_tokens=8192,
                     temperature=1.0,
+                    automatic_function_calling=_genai_module.types.AutomaticFunctionCallingConfig(disable=True),
                 ),
             )
         text = response.text or ""
@@ -1535,24 +1558,320 @@ def _generate_newspaper_card(plain_text: str, output_path: str) -> str:
     return output_path
 
 
-def _generate_captions_srt(a_roll_path: str, work_dir: str) -> str:
-    """Run Whisper on the a-roll audio and write an SRT file."""
+def _transcribe_a_roll(a_roll_path: str) -> dict[str, Any]:
+    """Run Whisper once on the a-roll audio with word-level timestamps.
+    Returns {"segments": [...] (for captions), "words": [{"word","start","end"}, ...] (for alignment)}."""
     try:
         import whisper as _whisper
     except ImportError as exc:
         raise RuntimeError("openai-whisper not installed. Run: pip install openai-whisper") from exc
 
     model = _whisper.load_model("tiny")
-    result = model.transcribe(a_roll_path)
+    result = model.transcribe(a_roll_path, word_timestamps=True)
 
+    segments = result.get("segments", [])
+    words: list[dict[str, Any]] = []
+    for seg in segments:
+        for w in seg.get("words", []):
+            word = (w.get("word") or "").strip()
+            if word:
+                words.append({"word": word, "start": w["start"], "end": w["end"]})
+
+    return {"segments": segments, "words": words}
+
+
+_NUM_ONES = {
+    "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+    "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17,
+    "eighteen": 18, "nineteen": 19,
+}
+_NUM_TENS = {
+    "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60,
+    "seventy": 70, "eighty": 80, "ninety": 90,
+}
+_NUM_SCALES = {"hundred": 100, "thousand": 1000, "million": 1000000}
+_NUM_UNIT_WORDS = {"percent", "dollars", "dollar", "rupees", "rupee"}
+
+
+def _word_to_number_value(word: str) -> int | None:
+    w = word.lower().strip(".,!?;:\"'")
+    if w in _NUM_ONES:
+        return _NUM_ONES[w]
+    if w in _NUM_TENS:
+        return _NUM_TENS[w]
+    if w in _NUM_SCALES:
+        return _NUM_SCALES[w]
+    return None
+
+
+def _merge_spoken_numbers(words: list[dict]) -> list[dict]:
+    """
+    Collapse runs of spoken number words ("three hundred", "fifteen", "four thousand")
+    into a single merged entry whose word is the digit string ("300", "15", "4000"),
+    spanning the whole run's timestamps.
+
+    Scripts write numbers as digits ("300%", "$4000") but a real recording says them
+    as words ("three hundred percent", "four thousand dollars") — without this, forced
+    alignment compares "300" against ["three","hundred","percent"], shares almost no
+    tokens, and the match score collapses. A trailing unit word (percent/dollars/
+    rupees) is consumed into the run but dropped from the merged token, since the
+    script side is compared after punctuation stripping anyway ("300%" -> "300").
+    """
+    merged: list[dict] = []
+    i = 0
+    n = len(words)
+    while i < n:
+        val = _word_to_number_value(words[i]["word"])
+        if val is None:
+            merged.append(words[i])
+            i += 1
+            continue
+
+        run_start = i
+        current = val
+        total = 0
+        i += 1
+        while i < n:
+            w_lower = words[i]["word"].lower().strip(".,!?;:\"'")
+            nxt = _word_to_number_value(words[i]["word"])
+            if nxt is not None:
+                if w_lower in _NUM_SCALES:
+                    current = (current or 1) * nxt
+                    if nxt >= 1000:
+                        total += current
+                        current = 0
+                else:
+                    current += nxt
+                i += 1
+            elif w_lower == "and":
+                i += 1  # "...hundred and fifty" — skip the connective, keep scanning
+            else:
+                break
+        number_value = total + current
+
+        run_end = i
+        if i < n and words[i]["word"].lower().strip(".,!?;:\"'") in _NUM_UNIT_WORDS:
+            run_end = i + 1  # consume the unit word into the run's timestamp span
+
+        merged.append({
+            "word": str(number_value),
+            "start": words[run_start]["start"],
+            "end": words[run_end - 1]["end"],
+        })
+        i = run_end
+
+    return merged
+
+
+def _write_captions_srt(segments: list[dict], work_dir: str) -> str:
+    """Write an SRT file from Whisper segments."""
     lines: list[str] = []
-    for i, seg in enumerate(result.get("segments", []), 1):
+    for i, seg in enumerate(segments, 1):
         lines.append(f"{i}\n{_srt_ts(seg['start'])} --> {_srt_ts(seg['end'])}\n{seg['text'].strip()}\n")
 
     srt_path = os.path.join(work_dir, "captions.srt")
     with open(srt_path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines))
     return srt_path
+
+
+def _normalize_words(text: str) -> list[str]:
+    """Lowercase, strip punctuation, split on whitespace — for text comparison during alignment."""
+    cleaned = re.sub(r"[^\w\s]", "", text.lower())
+    return cleaned.split()
+
+
+def _fuzzy_match_window(
+    target_words: list[str], audio_words: list[str], cursor: int, n: int
+) -> tuple[int | None, int | None, float]:
+    """Slide a window forward from `cursor` through `audio_words`, scoring each
+    candidate length against `target_words`, and return the best-scoring
+    (start_index, end_index, score). The core matcher shared by section-level
+    (F012) and shot-level (F013) forced alignment — only the word lists differ."""
+    target_len = len(target_words)
+    best_score = -1.0
+    best_start: int | None = None
+    best_end: int | None = None
+    max_lookahead = min(n, cursor + target_len * 4 + 40)
+    for start in range(cursor, max_lookahead):
+        for length_mult in (0.6, 0.8, 1.0, 1.2, 1.4, 1.8):
+            length = max(1, int(target_len * length_mult))
+            end = start + length
+            if end > n:
+                continue
+            window = audio_words[start:end]
+            score = difflib.SequenceMatcher(None, target_words, window).ratio()
+            if score > best_score:
+                best_score = score
+                best_start, best_end = start, end
+    return best_start, best_end, best_score
+
+
+def _align_shots_to_section(shots: list[dict], section_words: list[dict]) -> list[dict]:
+    """
+    Force-align each shot's literal `source_text` against the slice of the real
+    transcript that falls inside its section's already-resolved (F012) real time
+    span, recovering each shot's own actual start/end — so a shot plays exactly
+    while its depicted sentence is spoken, not at a fixed offset from section start.
+
+    A section's word count is small enough (one section, not the whole video) that
+    a moving search cursor barely constrains anything — so each shot is searched
+    independently across the WHOLE section, maximizing its chance of finding its
+    true location, rather than one shot's failure dragging a shared cursor to the
+    wrong place and cascading into the next shot's search. A match is only kept if
+    it's both confident AND doesn't jump backwards before an already-accepted shot
+    (keeps shots in the order they were written).
+
+    Returns a new list of shot dicts with "start_s"/"end_s" and "confidence" (the
+    REAL match score, even if below the trust threshold) and "matched_text" (what
+    the best candidate actually said — diagnostic, for seeing why a shot missed)
+    added. Shots with no trusted match are gap-filled between resolved neighbors,
+    proportioned by `duration_s`.
+    """
+    results = [dict(s) for s in shots]
+    if not section_words:
+        for r in results:
+            r.update(start_s=None, end_s=None, confidence=0.0, matched_text="")
+        return results
+
+    audio_words = [w["word"].lower().strip(".,!?;:\"'") for w in section_words]
+    n = len(audio_words)
+    TRUST = 0.3
+    cursor = 0
+
+    for r in results:
+        target_words = _normalize_words(r.get("source_text") or "")
+        if not target_words:
+            r.update(start_s=None, end_s=None, confidence=0.0, matched_text="")
+            continue
+        best_start, best_end, best_score = _fuzzy_match_window(target_words, audio_words, 0, n)
+        r["matched_text"] = " ".join(audio_words[best_start:best_end]) if best_start is not None else ""
+        r["confidence"] = best_score if best_start is not None else 0.0
+        if best_start is not None and best_score >= TRUST and best_start >= cursor:
+            r["start_s"] = section_words[best_start]["start"]
+            r["end_s"] = section_words[best_end - 1]["end"]
+            cursor = best_end
+        else:
+            r["start_s"] = None
+            r["end_s"] = None
+
+    # Gap-fill unresolved shots between resolved neighbors, proportioned by duration_s.
+    section_end = section_words[-1]["end"]
+    i = 0
+    while i < len(results):
+        if results[i]["start_s"] is not None:
+            i += 1
+            continue
+        run = []
+        j = i
+        while j < len(results) and results[j]["start_s"] is None:
+            run.append(results[j])
+            j += 1
+        prev_end = results[i - 1]["end_s"] if i > 0 else section_words[0]["start"]
+        next_start = results[j]["start_s"] if j < len(results) else section_end
+        gap = max(0.0, next_start - prev_end)
+        total_weight = sum(max(0.1, r.get("duration_s") or 8) for r in run) or 1.0
+        cursor_t = prev_end
+        for r in run:
+            share = max(0.1, r.get("duration_s") or 8) / total_weight
+            dur = gap * share
+            r["start_s"] = cursor_t
+            r["end_s"] = cursor_t + dur
+            cursor_t += dur
+        i = j
+
+    return results
+
+
+def _align_sections_to_audio(sections: list[dict], words: list[dict]) -> dict[int, dict]:
+    """
+    Force-align each section's known narration text against the real Whisper word-level
+    transcript, recovering the ACTUAL start/end time each section was spoken at — as
+    opposed to the scripted/planned timing baked into the script before recording.
+
+    Sequential, cursor-advancing search (not global): sections are read in the order
+    they were written, so each section only searches forward from where the previous
+    one ended. Returns {section_index: {"start_s", "end_s", "confidence"}}.
+    Sections with no confident match are filled in by interpolating between resolved
+    neighbors, proportioned by their original scripted duration (confidence 0.0).
+    """
+    if not words:
+        return {}
+
+    audio_words = [w["word"].lower().strip(".,!?;:\"'") for w in words]
+    n = len(words)
+    cursor = 0
+    raw: dict[int, dict] = {}
+
+    ordered = sorted(sections, key=lambda s: s["index"])
+
+    for sec in ordered:
+        idx = sec["index"]
+        sec_words = _normalize_words(sec.get("plain_text") or "")
+        if not sec_words:
+            continue
+
+        best_start, best_end, best_score = _fuzzy_match_window(sec_words, audio_words, cursor, n)
+        matched_text = " ".join(audio_words[best_start:best_end]) if best_start is not None else ""
+        if best_start is not None and best_score >= 0.35:
+            raw[idx] = {
+                "start_s": words[best_start]["start"],
+                "end_s": words[best_end - 1]["end"],
+                "confidence": best_score,
+                "matched_text": matched_text,
+            }
+            cursor = best_end
+        else:
+            raw[idx] = {
+                "start_s": None, "end_s": None,
+                "confidence": best_score if best_start is not None else 0.0,
+                "matched_text": matched_text,
+            }
+            # Advance anyway so the next section searches forward from roughly the
+            # right place instead of re-scanning the same stale region it just missed.
+            cursor = min(n, cursor + len(sec_words))
+
+    # Gap-fill any unresolved sections by interpolating between resolved neighbors,
+    # proportioned by each unresolved section's share of the original scripted duration.
+    total_audio_end = words[-1]["end"]
+    for i, sec in enumerate(ordered):
+        idx = sec["index"]
+        if raw.get(idx, {}).get("start_s") is not None:
+            continue
+
+        run = []
+        for j in range(i, len(ordered)):
+            jidx = ordered[j]["index"]
+            if raw.get(jidx, {}).get("start_s") is not None:
+                break
+            run.append(ordered[j])
+        if sec is not run[0]:
+            continue  # already filled as part of an earlier run
+
+        prev_end = 0.0
+        for j in range(i - 1, -1, -1):
+            pidx = ordered[j]["index"]
+            if raw.get(pidx, {}).get("start_s") is not None:
+                prev_end = raw[pidx]["end_s"]
+                break
+        next_start = total_audio_end
+        for j in range(i + len(run), len(ordered)):
+            nidx = ordered[j]["index"]
+            if raw.get(nidx, {}).get("start_s") is not None:
+                next_start = raw[nidx]["start_s"]
+                break
+
+        gap = max(0.0, next_start - prev_end)
+        total_scripted = sum(max(0.1, s["timing"]["end_s"] - s["timing"]["start_s"]) for s in run) or 1.0
+        cursor_t = prev_end
+        for s in run:
+            share = max(0.1, s["timing"]["end_s"] - s["timing"]["start_s"]) / total_scripted
+            dur = gap * share
+            raw[s["index"]] = {"start_s": cursor_t, "end_s": cursor_t + dur, "confidence": 0.0}
+            cursor_t += dur
+
+    return raw
 
 
 def _load_latest_script_json(date_ist: str) -> dict[str, Any] | None:
@@ -1675,34 +1994,32 @@ def _build_veo_shots(section: dict, b_roll_prompt: str, total_duration_s: float,
     """
     api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
     if not api_key or not _GENAI_AVAILABLE:
-        return [{"moment": "main shot", "duration_s": int(round(total_duration_s)), "prompt": b_roll_prompt}]
+        return [{"moment": "main shot", "duration_s": int(round(total_duration_s)), "prompt": b_roll_prompt, "source_text": section.get("plain_text", "")}]
 
     section_label = section.get("label", section.get("name", ""))
     narration = _extract_narration(section)
     on_screen = section.get("on_screen_text", "")
     total_s = max(6, int(round(total_duration_s)))
 
-    # Choose shot count: based on narration length (too-short narration → 1 shot; Veo max is 8s per clip)
+    # Choose shot count from the real duration needed; every shot is a full, untrimmed
+    # 8s Veo generation (its native length) rather than an uneven fraction of one.
     if len(narration) < 120:
         # Very short narration — not enough material to split meaningfully
         num_shots = 1
-        shot_s = [min(8, total_s)]
-    elif total_s <= 10:
-        num_shots = 2
-        shot_s = [min(8, total_s // 2), min(8, total_s - total_s // 2)]
     else:
-        num_shots = 3
-        base = min(8, total_s // 3)
-        shot_s = [base, base, min(8, total_s - 2 * base)]
+        num_shots = min(3, max(1, math.ceil(total_s / 8)))
+    shot_s = [8] * num_shots
 
     if num_shots == 1:
-        # Skip Gemini — just build a single-shot prompt using the old reliable path
+        # Skip Gemini — just build a single-shot prompt using the old reliable path.
+        # The whole section is what this one shot depicts.
         single = _build_single_veo_prompt(section, b_roll_prompt, narration, on_screen, visual_bible=visual_bible)
-        return [{"moment": section_label or "main shot", "duration_s": shot_s[0], "prompt": single}]
+        source_text = section.get("plain_text") or narration
+        return [{"moment": section_label or "main shot", "duration_s": shot_s[0], "prompt": single, "source_text": source_text}]
 
     # Duration tags for the multi-shot prompt
     duration_tags = " / ".join(f"SHOT {i + 1} = {shot_s[i]}s" for i in range(num_shots))
-    split_hint = f"Clip durations: {duration_tags} (Veo generates 8-second clips; FFmpeg will trim each to the target duration.)"
+    split_hint = f"Clip durations: {duration_tags} (each is a full, untrimmed 8-second Veo generation)."
 
     meta_prompt = f"""You are an editorial director and senior cinematographer for a short-form finance/business documentary series optimised for vertical mobile screens.
 
@@ -1752,12 +2069,15 @@ This b-roll sequence plays while the narrator says:
 Original visual concept note: "{b_roll_prompt}"
 {bible_section}
 Write {num_shots} separate Veo video prompts — one per clip.
-Clip durations: {duration_tags} (Veo generates 8-second clips; FFmpeg will trim each to the target duration.)
+Clip durations: {duration_tags} (each is a full, untrimmed 8-second Veo generation).
 
 Each clip must cover a DISTINCT visual story beat from the narration. Identify {num_shots} different moments, phases, or objects in the story and write one cinematic prompt for each.
 
-For EACH clip write a 100–130 word cinematic paragraph covering:
+For EACH clip, first pick the exact clause or sentence from the narration above that it depicts — copy it verbatim, do not paraphrase. This clause is used later to place the clip at the exact moment it's spoken, so it must be a real, contiguous excerpt of the narration text, not a summary.
+
+Then write a 100–130 word cinematic paragraph covering:
 - Subject and action (specific brands, products, real locations, people's roles — all allowed)
+- GROUNDING: if the clause contains a specific number, figure, date, or named claim (e.g. "300%", "$4000", "35-40 days"), the shot must visually show that exact number or claim on screen — a price board, a calendar, a chart label, a receipt — not an abstract stand-in like "a stressed person" or "a busy office"
 - Camera movement + shot type (slow dolly push-in / low-angle handheld / aerial crane / static macro close-up)
 - Environment (specific place, time of day, atmosphere)
 - Lighting (quality, direction, colour temperature)
@@ -1770,12 +2090,15 @@ Where entities from the VISUAL CONSISTENCY GUIDE appear in a shot, embed their e
 Format your response EXACTLY like this:
 
 SHOT 1 — <5-8 word moment label>
+DEPICTS: <verbatim clause copied from the narration above>
 <full cinematic prompt paragraph>
 
 SHOT 2 — <5-8 word moment label>
+DEPICTS: <verbatim clause copied from the narration above>
 <full cinematic prompt paragraph>
 
 SHOT 3 — <5-8 word moment label>
+DEPICTS: <verbatim clause copied from the narration above>
 <full cinematic prompt paragraph>
 
 Only write the shots in the format above. No introduction, no explanation."""
@@ -1804,18 +2127,26 @@ Only write the shots in the format above. No introduction, no explanation."""
 
         parsed_shots: list[dict] = []
         for i, block in enumerate(shot_blocks[:num_shots]):
-            # First line is the moment label, rest is the prompt
+            # First line is the moment label, second line is "DEPICTS: ..." (optional,
+            # used for shot-level alignment), remaining lines are the prompt.
             blines = block.strip().splitlines()
             if len(blines) >= 2:
                 moment = blines[0].strip().strip("—–-").strip()
-                prompt_text = " ".join(l.strip() for l in blines[1:] if l.strip())
+                rest = blines[1:]
+                source_text = ""
+                if rest and rest[0].strip().upper().startswith("DEPICTS:"):
+                    source_text = rest[0].split(":", 1)[1].strip().strip('"')
+                    rest = rest[1:]
+                prompt_text = " ".join(l.strip() for l in rest if l.strip())
             else:
                 moment = f"Shot {i + 1}"
+                source_text = ""
                 prompt_text = block.strip()
             parsed_shots.append({
                 "moment": moment,
                 "duration_s": shot_s[i] if i < len(shot_s) else 4,
                 "prompt": prompt_text,
+                "source_text": source_text,
             })
 
         if not all(len(s["prompt"]) > 40 for s in parsed_shots):
@@ -1827,7 +2158,7 @@ Only write the shots in the format above. No introduction, no explanation."""
     except Exception as exc:
         print(f"[AI B-roll] Multi-shot build failed ({exc}), falling back to single shot", flush=True)
 
-    return [{"moment": "main shot", "duration_s": total_s, "prompt": b_roll_prompt}]
+    return [{"moment": "main shot", "duration_s": total_s, "prompt": b_roll_prompt, "source_text": section.get("plain_text", "")}]
 
 
 def _generate_single_veo_clip(
@@ -1924,19 +2255,24 @@ def _generate_single_veo_clip(
         return False
 
 
-def _generate_ai_broll(
+def _generate_shots_for_section(
     section: dict,
     b_roll_prompt: str,
     duration_s: float,
-    output_path: str,
+    out_dir: str,
     log_cb=None,
     visual_bible: dict | None = None,
-) -> str | None:
+) -> list[dict]:
     """
-    Multi-shot AI b-roll pipeline:
-    1. Gemini splits narration into 2–3 directed Veo shots (with visual bible injection)
-    2. Shots are generated in parallel via Veo 3.1 on Vertex AI
-    3. FFmpeg trims + normalises each clip, then concatenates them
+    Plan + generate every Veo shot for a section:
+    1. Gemini splits narration into 1–3 directed shots, each tagged with the literal
+       narration clause it depicts (with visual bible injection)
+    2. Shots are generated in parallel via Veo 3.1 on Vertex AI, each a standalone file
+
+    Returns [{"path", "source_text", "duration_s", "moment"}] for shots that generated
+    successfully (empty list if none did). No concatenation — callers decide whether
+    shots stay independent (real pipeline, for per-shot placement) or get combined
+    into one file (B-Roll Test, which wants one inspectable clip).
     """
     def _log(msg: str):
         print(f"[AI B-roll] {msg}", flush=True)
@@ -1948,10 +2284,10 @@ def _generate_ai_broll(
 
     if not _GENAI_AVAILABLE:
         _log("google-genai not installed")
-        return None
+        return []
     if not vertex_project:
         _log("VERTEX_PROJECT not set")
-        return None
+        return []
 
     section_name = section.get("name", "")
     narration = _extract_narration(section)
@@ -1966,12 +2302,13 @@ def _generate_ai_broll(
     _log(f"Shot plan: {len(shots)} clips")
     for i, s in enumerate(shots):
         _log(f"  Shot {i + 1} ({s['duration_s']}s) — {s['moment']}")
+        _log(f"    Depicts: \"{s.get('source_text', '')[:100]}\"")
         _log(f"    Prompt: {s['prompt'][:120]}…")
 
     # Generate all shots in parallel
     sec_idx = section.get("index", 0)
     clip_paths = [
-        os.path.join(tempfile.gettempdir(), f"veo_shot_{os.getpid()}_{sec_idx}_{i}.mp4")
+        os.path.join(out_dir, f"broll_{sec_idx}_{i}.mp4")
         for i in range(len(shots))
     ]
 
@@ -1995,46 +2332,85 @@ def _generate_ai_broll(
             success_flags[idx] = bool(future.result())
             _log(f"Shot {idx + 1} {'✓' if success_flags[idx] else '✗'}")
 
-    successful_clips = [clip_paths[i] for i in range(len(shots)) if success_flags[i]]
+    return [
+        {
+            "path": clip_paths[i],
+            "source_text": shots[i].get("source_text", ""),
+            "duration_s": shots[i]["duration_s"],
+            "moment": shots[i]["moment"],
+        }
+        for i in range(len(shots))
+        if success_flags[i]
+    ]
 
-    if not successful_clips:
-        _log("All shots failed")
-        return None
 
-    if len(successful_clips) == 1:
-        import shutil as _sh
-        _sh.move(successful_clips[0], output_path)
-        size_kb = Path(output_path).stat().st_size // 1024
-        _log(f"✓ Single clip ready ({size_kb} KB)")
-        return output_path
+def _generate_ai_broll(
+    section: dict,
+    b_roll_prompt: str,
+    duration_s: float,
+    output_path: str,
+    log_cb=None,
+    visual_bible: dict | None = None,
+) -> str | None:
+    """Single-file b-roll for one section — used by the B-Roll Test feature, which
+    wants one inspectable/downloadable clip rather than individually-placed shots.
+    The real pipeline uses _generate_ai_broll_shots instead (see F013)."""
+    def _log(msg: str):
+        print(f"[AI B-roll] {msg}", flush=True)
+        if log_cb:
+            log_cb(msg)
 
-    # Concat all successful clips with FFmpeg (streams already uniform — fast copy)
-    filelist = os.path.join(tempfile.gettempdir(), f"veo_concat_{os.getpid()}_{sec_idx}.txt")
-    with open(filelist, "w") as fh:
-        for cp in successful_clips:
-            fh.write(f"file '{cp}'\n")
-
-    ff = subprocess.run(
-        ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", filelist, "-c", "copy", output_path],
-        capture_output=True, text=True, timeout=60,
-    )
+    out_dir = tempfile.mkdtemp(prefix="broll_shots_")
     try:
-        os.unlink(filelist)
-    except OSError:
-        pass
-    for cp in successful_clips:
-        try:
-            os.unlink(cp)
-        except OSError:
-            pass
+        results = _generate_shots_for_section(
+            section, b_roll_prompt, duration_s, out_dir, log_cb=log_cb, visual_bible=visual_bible
+        )
+        if not results:
+            _log("All shots failed")
+            return None
 
-    if ff.returncode != 0:
-        _log(f"FFmpeg concat failed: {ff.stderr[-300:]}")
-        return None
+        if len(results) == 1:
+            import shutil as _sh
+            _sh.move(results[0]["path"], output_path)
+            size_kb = Path(output_path).stat().st_size // 1024
+            _log(f"✓ Single clip ready ({size_kb} KB)")
+            return output_path
 
-    size_kb = Path(output_path).stat().st_size // 1024
-    _log(f"✓ {len(successful_clips)}-shot concat ready ({size_kb} KB)")
-    return output_path
+        # Concat all successful clips with FFmpeg (streams already uniform — fast copy)
+        filelist = os.path.join(out_dir, "concat.txt")
+        with open(filelist, "w") as fh:
+            for r in results:
+                fh.write(f"file '{r['path']}'\n")
+
+        ff = subprocess.run(
+            ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", filelist, "-c", "copy", output_path],
+            capture_output=True, text=True, timeout=60,
+        )
+        if ff.returncode != 0:
+            _log(f"FFmpeg concat failed: {ff.stderr[-300:]}")
+            return None
+
+        size_kb = Path(output_path).stat().st_size // 1024
+        _log(f"✓ {len(results)}-shot concat ready ({size_kb} KB)")
+        return output_path
+    finally:
+        shutil.rmtree(out_dir, ignore_errors=True)
+
+
+def _generate_ai_broll_shots(
+    section: dict,
+    b_roll_prompt: str,
+    duration_s: float,
+    work_dir: str,
+    log_cb=None,
+    visual_bible: dict | None = None,
+) -> list[dict]:
+    """Shot-level b-roll for the real pipeline (F013) — each shot stays its own file,
+    saved into the pipeline's work_dir, so it can be placed at its own real aligned
+    timestamp instead of one concatenated block per section."""
+    return _generate_shots_for_section(
+        section, b_roll_prompt, duration_s, work_dir, log_cb=log_cb, visual_bible=visual_bible
+    )
 
 
 def _compute_visual_bible(date_ist: str, sections: list) -> dict:
@@ -2558,13 +2934,20 @@ def _probe_duration(path: str) -> float:
 
 def _build_ffmpeg_cmd(
     a_roll_path: str,
-    b_roll_map: dict[int, str],
+    broll_placements: list[dict],
     sections: list[dict],
     srt_path: str,
     newspaper_png: str | None,
     output_path: str,
     total_s: float = 0.0,
 ) -> list[str]:
+    """
+    broll_placements: flat, ordered list of independently-timed b-roll overlays —
+    [{"path", "start_s", "end_s"}]. Manually-uploaded b-roll gets one placement per
+    section (using that section's aligned timing); AI-generated b-roll gets one
+    placement PER SHOT (F013), each at its own real aligned timestamp within the
+    section, rather than one concatenated block per section.
+    """
     CW, CH = 1080, 1920
 
     # Scale any 16:9 clip to fill 9:16 canvas — zoom-fill then center-crop
@@ -2575,15 +2958,13 @@ def _build_ffmpeg_cmd(
 
     # ── Inputs ────────────────────────────────────────────────────────────────
     inputs: list[str] = ["-i", a_roll_path]
-    broll_inp: dict[int, int] = {}  # section_index → ffmpeg input index
-    for sec_idx in sorted(b_roll_map):
-        inputs += ["-i", b_roll_map[sec_idx]]
-        broll_inp[sec_idx] = len(broll_inp) + 1
+    for p in broll_placements:
+        inputs += ["-i", p["path"]]
 
     np_idx: int | None = None
     if newspaper_png:
         inputs += ["-loop", "1", "-i", newspaper_png]
-        np_idx = len(broll_inp) + 1
+        np_idx = len(broll_placements) + 1
 
     # ── Filter graph ──────────────────────────────────────────────────────────
     fc: list[str] = []
@@ -2592,26 +2973,24 @@ def _build_ffmpeg_cmd(
     fc.append(f"[0:v]{FILL}[aroll]")
 
     # Each b-roll → full-screen 9:16
-    for sec_idx, i_idx in broll_inp.items():
-        fc.append(f"[{i_idx}:v]{FILL}[br{sec_idx}]")
+    for i in range(len(broll_placements)):
+        fc.append(f"[{i + 1}:v]{FILL}[br{i}]")
 
-    # Build video timeline: a-roll is base; b-roll clips overlay during their sections
+    # Build video timeline: a-roll is base; each b-roll clip overlays during its own
+    # independently-aligned window
     vid = "aroll"
-    for k, sec_idx in enumerate(sorted(broll_inp)):
-        sec = next((s for s in sections if s.get("index") == sec_idx), None)
-        if not sec:
-            continue
-        t0, t1 = sec["timing"]["start_s"], sec["timing"]["end_s"]
+    for i, p in enumerate(broll_placements):
+        t0, t1 = p["start_s"], p["end_s"]
         # Clamp the overlay window to how much b-roll footage actually exists, so the
         # clip plays through once and then reverts to a-roll instead of freezing on
-        # its last frame for the remainder of the section.
-        clip_dur = _probe_duration(b_roll_map[sec_idx])
+        # its last frame for the remainder of the window.
+        clip_dur = _probe_duration(p["path"])
         t1_eff = min(t1, t0 + clip_dur) if clip_dur > 0 else t1
         # Delay the b-roll stream's own timeline so frame 0 lands at t0 — overlay
         # otherwise plays both inputs from absolute time 0, desyncing short clips.
-        delayed = f"br{sec_idx}d"
-        fc.append(f"[br{sec_idx}]setpts=PTS+{t0}/TB[{delayed}]")
-        nxt = f"bv{k}"
+        delayed = f"br{i}d"
+        fc.append(f"[br{i}]setpts=PTS+{t0}/TB[{delayed}]")
+        nxt = f"bv{i}"
         fc.append(
             f"[{vid}][{delayed}]overlay=0:0:enable='between(t,{t0},{t1_eff})'[{nxt}]"
         )
@@ -2703,7 +3082,58 @@ def _run_pipeline(date_ist: str) -> None:
 
         work_dir = tempfile.mkdtemp(prefix="pipeline_")
         try:
-            # Auto-source b-roll from YouTube for any b-roll section without a manual upload
+            # Captured before alignment mutates each section's timing in place.
+            scripted_total = max((s["timing"]["end_s"] for s in sections), default=90.0)
+
+            # Transcribe first (word-level) so b-roll generation and the final overlay
+            # can be anchored to when sections were ACTUALLY spoken, not the scripted plan.
+            _update("Transcribing audio with Whisper (this takes a few minutes on CPU)…", step="whisper")
+            transcript = _transcribe_a_roll(a_roll_path)
+            # Collapse spoken number words ("three hundred percent") into digit tokens
+            # ("300") so they match how the script writes numbers — otherwise every
+            # numeric clause (which b-roll grounding deliberately targets) fails to align.
+            transcript["words"] = _merge_spoken_numbers(transcript["words"])
+            _update(f"Whisper transcription done — {len(transcript['words'])} words", step="whisper")
+
+            _update("Aligning script sections to the actual recording…", step="whisper")
+            aligned = _align_sections_to_audio(sections, transcript["words"])
+            for sec in sections:
+                a = aligned.get(sec["index"])
+                if not a:
+                    continue
+                scripted = dict(sec["timing"])
+                sec["scripted_timing"] = scripted
+                sec["timing"] = {"start_s": round(a["start_s"], 2), "end_s": round(a["end_s"], 2)}
+                tag = "matched" if a["confidence"] >= 0.35 else "estimated"
+                _update(
+                    f"  '{sec.get('name')}': scripted {scripted['start_s']:.0f}-{scripted['end_s']:.0f}s → "
+                    f"actual {sec['timing']['start_s']:.1f}-{sec['timing']['end_s']:.1f}s "
+                    f"({tag}, confidence {a['confidence']:.2f})",
+                    step="whisper",
+                )
+                if tag == "estimated":
+                    _update(
+                        f"    looking for: \"{(sec.get('plain_text') or '')[:100]}\"",
+                        step="whisper",
+                    )
+                    _update(
+                        f"    best candidate found: \"{a.get('matched_text', '')[:100]}\"",
+                        step="whisper",
+                    )
+
+            srt_path = _write_captions_srt(transcript["segments"], work_dir)
+            _update(f"Captions ready → {Path(srt_path).name}", step="whisper")
+
+            # Flat, ordered list of independently-timed b-roll overlays — see F013.
+            # Manually-uploaded clips get one placement per section (aligned timing);
+            # AI-generated b-roll gets one placement PER SHOT (its own aligned timing).
+            broll_placements: list[dict] = []
+            for sec_idx, path in b_roll_map.items():
+                sec = next((s for s in sections if s.get("index") == sec_idx), None)
+                if sec:
+                    broll_placements.append({"path": path, "start_s": sec["timing"]["start_s"], "end_s": sec["timing"]["end_s"]})
+
+            # Auto-source b-roll for any b-roll section without a manual upload
             # Exclude hook and cta explicitly even if they were marked b_roll in the script
             b_roll_sections = [s for s in sections if s.get("shot_type") == "b_roll" and s.get("name") not in ("hook", "cta")]
             missing = [s for s in b_roll_sections if s.get("index") not in b_roll_map]
@@ -2715,19 +3145,48 @@ def _run_pipeline(date_ist: str) -> None:
                 _update(f"Generating AI b-roll for {len(missing)} section(s)…", step="assets")
                 for sec in missing:
                     sec_idx = sec.get("index")
+                    sec_t0, sec_t1 = sec["timing"]["start_s"], sec["timing"]["end_s"]
                     prompt = (sec.get("b_roll_prompt") or sec.get("label") or sec.get("name") or "business news footage")
-                    duration_s = _broll_clip_duration(sec["timing"]["end_s"] - sec["timing"]["start_s"])
-                    auto_path = os.path.join(work_dir, f"auto_broll_{sec_idx}.mp4")
-                    found = _generate_ai_broll(sec, prompt, duration_s, auto_path, log_cb=lambda m: _update(m, step="assets"), visual_bible=visual_bible)
-                    if found:
-                        b_roll_map[sec_idx] = found
-                        _update(f"  ✓ AI b-roll generated for '{sec.get('name')}'", step="assets")
-                    else:
+                    duration_s = _broll_clip_duration(sec_t1 - sec_t0)
+                    shot_results = _generate_ai_broll_shots(
+                        sec, prompt, duration_s, work_dir,
+                        log_cb=lambda m: _update(m, step="assets"), visual_bible=visual_bible,
+                    )
+                    if not shot_results:
                         _update(f"  ✗ AI b-roll failed for '{sec.get('name')}' — using a-roll", step="assets")
+                        continue
 
-            _update("Transcribing audio with Whisper (this takes a few minutes on CPU)…", step="whisper")
-            srt_path = _generate_captions_srt(a_roll_path, work_dir)
-            _update(f"Whisper done → {Path(srt_path).name}", step="whisper")
+                    # Place each shot at the real moment it depicts within this section's
+                    # own resolved audio span (F013), not at a fixed offset from sec_t0.
+                    section_words = [
+                        w for w in transcript["words"]
+                        if w["start"] >= sec_t0 and w["end"] <= sec_t1
+                    ]
+                    shot_timings = _align_shots_to_section(shot_results, section_words)
+
+                    # Defensive fallback (should be rare): a shot with no resolvable
+                    # timing at all gets an even split of the section span rather than
+                    # being silently dropped after we already paid to generate it.
+                    unresolved = [s for s in shot_timings if s["start_s"] is None]
+                    if unresolved:
+                        share = (sec_t1 - sec_t0) / len(shot_timings)
+                        for i, s in enumerate(shot_timings):
+                            if s["start_s"] is None:
+                                s["start_s"] = sec_t0 + i * share
+                                s["end_s"] = sec_t0 + (i + 1) * share
+
+                    for s in shot_timings:
+                        broll_placements.append({"path": s["path"], "start_s": s["start_s"], "end_s": s["end_s"]})
+                        conf = s.get("confidence", 0.0)
+                        tag = "matched" if conf >= 0.3 else "estimated"
+                        _update(
+                            f"    shot '{s['moment']}': {s['start_s']:.1f}-{s['end_s']:.1f}s ({tag}, confidence {conf:.2f})",
+                            step="assets",
+                        )
+                        if tag == "estimated":
+                            _update(f"      looking for: \"{s.get('source_text', '')[:100]}\"", step="assets")
+                            _update(f"      best candidate found: \"{s.get('matched_text', '')[:100]}\"", step="assets")
+                    _update(f"  ✓ {len(shot_results)} shot(s) placed for '{sec.get('name')}'", step="assets")
 
             # Newspaper card overlay disabled — popped on screen as an unwanted artifact.
             newspaper_png: str | None = None
@@ -2736,7 +3195,6 @@ def _run_pipeline(date_ist: str) -> None:
             # section timings. The script's timings are a recording guide; if you talk
             # longer or shorter than planned, trimming to the scripted total cuts off
             # real content (e.g. the CTA).
-            scripted_total = max((s["timing"]["end_s"] for s in sections), default=90.0)
             a_roll_dur = _probe_duration(a_roll_path)
             total_s = a_roll_dur if a_roll_dur > 0 else scripted_total
             if a_roll_dur > 0 and abs(a_roll_dur - scripted_total) > 1.0:
@@ -2746,7 +3204,7 @@ def _run_pipeline(date_ist: str) -> None:
                 )
 
             output_path = str(OUTPUTS_DIR / f"{date_ist}_final_edit.mp4")
-            cmd = _build_ffmpeg_cmd(a_roll_path, b_roll_map, sections, srt_path, newspaper_png, output_path, total_s=total_s)
+            cmd = _build_ffmpeg_cmd(a_roll_path, broll_placements, sections, srt_path, newspaper_png, output_path, total_s=total_s)
             _update(f"Starting FFmpeg… output: {Path(output_path).name}", step="ffmpeg")
             print(f"[Pipeline] FFmpeg cmd: {' '.join(cmd[:8])}…", flush=True)
             time_re = re.compile(r"time=(\d{2}):(\d{2}):(\d{2}\.\d+)")

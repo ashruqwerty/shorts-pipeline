@@ -8,7 +8,11 @@ try:
     load_dotenv(BACKEND_DIR / ".env")
 except ImportError:
     pass
-LOCAL_STORAGE_DIR = BASE_DIR / "local_storage"
+import os as _os_early
+
+# Tests set this to point the whole app at an isolated, throwaway storage tree
+# instead of the real local_storage/ — keeps test runs from touching real data.
+LOCAL_STORAGE_DIR = Path(_os_early.environ["SHORTS_PIPELINE_STORAGE_DIR"]) if _os_early.environ.get("SHORTS_PIPELINE_STORAGE_DIR") else BASE_DIR / "local_storage"
 DB_PATH = LOCAL_STORAGE_DIR / "pipeline.db"
 TOPIC_QUEUE_PATH = BASE_DIR / "TOPIC_QUEUE_30_DAYS.csv"
 
